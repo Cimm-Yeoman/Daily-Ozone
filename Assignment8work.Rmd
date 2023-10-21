@@ -1,0 +1,253 @@
+---
+title: "Multiple regression and smoothing splines for a Bayesian model: predicting daily ozone levels"  
+author: "Cimmaron Yeoman"
+date: "2023-04-25"
+output: pdf_document
+html_document: default
+header-includes:
+    - \usepackage{sectsty}
+    - \allsectionsfont{\color{blue}}
+---
+
+## Introduction
+
+This data set includes the environmental variables ozone, humidity, and temperature, along
+with day of the week and day of the year. Ozone has some level of a relationship with human 
+disturbances, especially actions which alter temperature, such as vehicle use and and 
+greenhouse gas outputs. This report will attempt to predict the daily ozone level, our
+response, with a multiple regression Bayesian framework. A smoothing spline will be implemented
+to help make predictions and identify patterns in the data set. 
+
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+library(readr)
+library(rethinking)
+library(knitr)
+ozone <- read_csv("ozone.csv")
+d <- ozone
+```
+
+## Data organization and cleaning
+
+The data set contains categorical and index variables including days of the year,
+and days of the week. These values cannot be standardized before building models. 
+I insured both of these variables were stored as integers. Ozone (**OZ**), humidity (**H**), 
+and temperature (**FT**) in degrees Fahrenheit were all standardized and renamed. 
+
+```{r, include = FALSE}
+d$OZ <- standardize(d$O3)
+d$H <- standardize(d$humidity)
+d$FT <- standardize(d$temp)
+d$DW_id <- as.integer(d$dow)
+d$DY <- as.integer(d$doy)
+```
+
+## Exploring the data
+
+After standardizing, we can see from the data set summary that the average values for ozone, 
+humidity, and temperature (unsquared) were at or around zero, and 75% of the observations fell below roughly 
+0.75 for each. 
+
+```{r, echo = FALSE}
+summary(d[c("OZ", "H", "FT")])
+```
+
+### Density plots of ozone, humidty and temperature
+
+The density plots below show the distribution of the standardized variables. Ozone was
+skewed right and had a long tail, but if you compare this to the boxplot of ozone, the tail 
+can be explained by some outliers. Humidity looked a bit odd with a bimodal appearance,
+although the shorter peak on the left was clearly much smaller than the peak on the right.
+Temperature had a double peak appearance as well. This can be explained by seasonal 
+differences most likely, especially temperature. 
+
+**Figure 1**
+\vspace*{-2mm}
+```{r, echo = FALSE, out.width = '35%'}
+dens(d$OZ, col = "blue", xlim = c(-2, 4))
+dens(d$H, col = "darkgreen")
+dens(d$FT, col = "red", xlim = c(-3, 3))
+```
+
+### Boxplots of ozone, humidity, and temperature 
+
+**Figure 2**
+\vspace*{-10mm}
+```{r, echo = FALSE, out.width = '85%'}
+boxplot(d[c("OZ", "H", "FT")], ylim = c(-4, 4), 
+        col = c("blue", "darkgreen", "red"), names = c("Ozone", "Humidity", "Temperature"))
+```
+
+You can see in the scatter plots why it is necessary to standardize varibles used in
+models, first. Without their varying scales, they can be compared more easily
+against each other. The potential outlier is visible in the ozone boxplot. 
+
+## Scatter plots and relationships, spline candidates
+
+**Figure 3**
+\vspace*{-5mm}
+```{r, echo = FALSE, out.width = '85%'}
+pairs(d[c("OZ", "H", "FT", "DW_id", "DY")], pch = 20, col = "lightseagreen", 
+      lower.panel = NULL)
+```
+
+Ozone had a positive linear relationship with temperature (**FT**), and some level
+of overlapping observations for humidity and days of the year. The days of the week
+variable (**DW_ID**) needs to be properly indexed into any models, so we can actually
+observe its relationship to ozone. Days of the week produces a concave shape when
+paired with different variables. These patterns could work for building the smooths. 
+
+## Creating smoothing splines 
+
+I knew in advance there were no missing cases, but I stored the data set **d** as a
+data frame using the complete.cases function, and renamed it **d2**. Ruling out missing cases
+must be done before modelling. The final choice of knots for the smooths were decided after 
+trying a few different values. Degrees was kept at 3 for cubic splines. One other version like 
+the spline set up below was also created for a second smooth, but was hidden to save space. Only 
+the knots changed in this version. 
+
+```{r, results = 'hide', message = FALSE}
+library(splines)
+d2 <- d[complete.cases(d), ]
+num_knots <- 15
+knot_list <- quantile(d$DY, probs = seq(0, 1, length.out = num_knots))
+
+```
+
+```{r}
+B <- bs(d2$DY,
+        knots = knot_list[-c(1, num_knots)],
+        degree = 3,
+        intercept = TRUE
+        )
+```
+
+```{r, include = FALSE}
+num_knots2 <-  15
+knot_list2 <- quantile(d$DY, probs = seq(0, 1, length.out = num_knots))
+
+```
+
+```{r, include = FALSE}
+B2 <- bs(d2$DY,
+        knots = knot_list2[-c(1, num_knots2)],
+        degree = 3,
+        intercept = TRUE
+        )
+```
+
+## First model 
+
+This model predicts mean ozone using an indexed days of the week variable (**DW_id**),
+coefficients for humidity (**H**) and temperature (**T**), and the spline created from the days of the year 
+variable (**DY**). 
+
+```{r}
+set.seed(41)
+flist1 <- alist(ozone ~ dnorm(mu, sigma),
+               mu <- a[DW_id] + bH*H + bFT*FT + B %*% w,
+               a[DW_id] ~ dnorm(0, 1),
+               bH ~ dnorm(0, 1),
+               bFT ~ dnorm(0, 1),
+               w ~ dnorm(0, 1),
+               sigma ~ dexp(1)
+              )
+mod1 <- quap(flist = flist1, data = list(ozone = d2$OZ, 
+                                        B = B, H = d2$H, FT = d2$FT, 
+                                        DW_id = d2$DW_id), 
+             start = list(w = rep(0, ncol(B)))
+            )
+precis(mod1, depth = 2, prob = 0.93)
+
+```
+
+
+The values for w were forced to start at 0 and the model selected the values
+for the posterior. The spline matrix, **B** represents $330 \times 17$. Matrix
+multiplication was performed with the %*% operator, multiplying it with $17 \times 1$ 
+vector, producing an object with $330$ observations. Statistical Rethinking describes 
+this as a sum linear predictor for each day of the year. 
+
+The indexed day of the week (**DW_id**) variable provides an estimate of the ozone levels 
+during different days of the week. Tuesdays and Fridays (days 2, 5) seem to have higher 
+ozone levels, and Sundays (day 7) have the lowest ozone levels. 
+
+## Mean posterior predictive intervals
+
+This is a plot of the 93% posterior predictive interval for mean ozone (**OZ**), plotted against
+day of the year (**DY**). The shade includes the smooth, the day of the week (**DW_id**) index,
+humidity (**H**), and temperature (**FT**). It looks very scraggly and chaotic, although we can see 
+it roughly follows the more densely clustered areas of ozone level plotted with day of the year. 
+
+**Figure 4**
+\vspace*{-10mm}
+```{r, echo = FALSE, out.width = '65%'}
+mu <- link( mod1 )
+mu_PI <- apply(mu,2,PI,0.93)
+plot( d2$DY , d2$OZ , col=col.alpha(rangi2,0.4) , pch=16,
+      ylab = "Standardized ozone level", xlab = "Day of the year",
+      font.lab = 2)
+legend("topleft", legend = c("Prediction interval (93%)"), 
+           col= col.alpha("black", 0.5), lty = 1, cex = 0.8, 
+           bg = "lightcyan1", text.font = 2)
+shade( mu_PI , d2$DY , col=col.alpha("black",0.5) )
+```
+
+## Thoughts on the model
+
+The model predicting the response of ozone may potentially be too complex or over-fitting.
+The interval combines many variables though which I assume is why it is more narrow as well. 
+We at least get a rough idea of the pattern of ozone levels against the days of the year.
+Ozone levels appear higher during warmer months as they tend to peak about halfway through
+each year. 
+
+## A simpler model and smooth
+
+This model only uses an intercept term and the B spline variable of day of the year (**DY**)
+to predict ozone. While it does not include nearly as much useful information, it managed to
+produce a relatively smooth  shade that follows the distribution of ozone. The shade 
+provides a wider prediction interval that is less specific, but still follows the clusteres
+of ozone level measurements across each day of the year
+
+```{r}
+set.seed(41)
+flistSS1 <- alist(ozone ~ dnorm(mu, sigma),
+               mu <- b0 + B2 %*% w,
+               b0 ~ dnorm(0, 1),
+               w ~ dnorm(0, 1),
+               sigma ~ dexp(1)
+              )
+modSS1 <- quap(flist = flistSS1, data = list(ozone = d2$OZ, 
+                                        B2 = B2), 
+             start = list(w = rep(0, ncol(B2)))
+            )
+precis(modSS1, depth = 2, prob = 0.93)
+
+```
+
+**Figure 5**
+\vspace*{-10mm}
+```{r, echo = FALSE, out.width = '65%'}
+mu <- link(modSS1)
+muPI <- apply(mu, 2, PI, 0.93)
+plot(d2$DY, d2$OZ, col = col.alpha(rangi2, 0.5), pch = 16,
+     ylab = "Standardized ozone level", xlab = "Day of the year",
+     font.lab = 2)
+legend("topleft", legend = c("Prediction interval (93%)"), 
+           col= col.alpha("black", 0.5), lty = 1, cex = 0.8, 
+           bg = "lightcyan1", text.font = 2)
+shade(muPI, d2$DY, col = col.alpha("black", 0.5) )
+```
+
+\vspace*{-15mm}
+## Conclusion
+
+Using variables such as humidity, temperature, and days of the year in particular, can
+create a model which predicts daily ozone levels. Using a multiple regression Bayesian model
+we can create a narrow 94% prediction interval smooth combined with selected predictor variables.
+When we simplify the model and decrease the number of predictors, we can make a wider 93% prediction
+interval that is more general, but follows the pattern of observed ozone levels. Ozone appeared
+to be seasonally influenced, with higher levels in the summer months, as ozone requires about 
+17◦C to form. Humidity may be useful but appears less important than temperature or day of the
+year. Ozone levels may be higher during weekdays, than weekends, possibly explained by less
+traffic and commuting to work. Temperature could also increase depending on the day of the week 
+in urban areas with large concentrations of vehicles. 
